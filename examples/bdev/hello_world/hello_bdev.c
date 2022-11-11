@@ -12,7 +12,8 @@
 #include "spdk/string.h"
 #include "spdk/bdev_zone.h"
 
-static char *g_bdev_name = "Malloc0";
+//static char *g_bdev_name = "Malloc0";
+static char *g_bdev_name = "aio0";
 
 /*
  * We'll use this struct to gather housekeeping hello_context to pass between
@@ -132,17 +133,19 @@ write_complete(struct spdk_bdev_io *bdev_io, bool success, void *cb_arg)
 static void
 hello_write(void *arg)
 {
+	printf("##############################################################\n");
 	struct hello_context_t *hello_context = arg;
 	int rc = 0;
 
-	SPDK_NOTICELOG("Writing to the bdev\n");
+	SPDK_NOTICELOG("Writing to the bdev:  %s\n", hello_context->bdev_name);
 	rc = spdk_bdev_write(hello_context->bdev_desc, hello_context->bdev_io_channel,
 			     hello_context->buff, 0, hello_context->buff_size, write_complete,
 			     hello_context);
 
+	/*
 	if (rc == -ENOMEM) {
-		SPDK_NOTICELOG("Queueing io\n");
-		/* In case we cannot perform I/O now, queue I/O */
+		SPDK_NOTICELOG("Failed Queueing io\n");
+		// In case we cannot perform I/O now, queue I/O 
 		hello_context->bdev_io_wait.bdev = hello_context->bdev;
 		hello_context->bdev_io_wait.cb_fn = hello_write;
 		hello_context->bdev_io_wait.cb_arg = hello_context;
@@ -154,6 +157,7 @@ hello_write(void *arg)
 		spdk_bdev_close(hello_context->bdev_desc);
 		spdk_app_stop(-1);
 	}
+*/
 }
 
 static void
@@ -216,64 +220,70 @@ hello_start(void *arg1)
 	struct hello_context_t *hello_context = arg1;
 	uint32_t buf_align;
 	int rc = 0;
-	hello_context->bdev = NULL;
-	hello_context->bdev_desc = NULL;
+	int i;
+	for (i=0;i<2;i++) {
+		hello_context[i].bdev = NULL;
+		hello_context[i].bdev_desc = NULL;
 
-	SPDK_NOTICELOG("Successfully started the application\n");
+		SPDK_NOTICELOG("Successfully started the application\n");
 
-	/*
-	 * There can be many bdevs configured, but this application will only use
-	 * the one input by the user at runtime.
-	 *
-	 * Open the bdev by calling spdk_bdev_open_ext() with its name.
-	 * The function will return a descriptor
-	 */
-	SPDK_NOTICELOG("Opening the bdev %s\n", hello_context->bdev_name);
-	rc = spdk_bdev_open_ext(hello_context->bdev_name, true, hello_bdev_event_cb, NULL,
-				&hello_context->bdev_desc);
-	if (rc) {
-		SPDK_ERRLOG("Could not open bdev: %s\n", hello_context->bdev_name);
-		spdk_app_stop(-1);
-		return;
+		/*
+		 * There can be many bdevs configured, but this application will only use
+		 * the one input by the user at runtime.
+		 *
+		 * Open the bdev by calling spdk_bdev_open_ext() with its name.
+		 * The function will return a descriptor
+		 */
+		SPDK_NOTICELOG("Opening the bdev %s\n", hello_context[i].bdev_name);
+		rc = spdk_bdev_open_ext(hello_context[i].bdev_name, true, hello_bdev_event_cb, NULL,
+				&hello_context[i].bdev_desc);
+		if (rc) {
+			SPDK_ERRLOG("Could not open bdev: %s\n", hello_context[i].bdev_name);
+			spdk_app_stop(-1);
+			return;
+		}
+
+		/* A bdev pointer is valid while the bdev is opened. */
+		hello_context[i].bdev = spdk_bdev_desc_get_bdev(hello_context[i].bdev_desc);
+
+
+		SPDK_NOTICELOG("Opening io channel\n");
+		/* Open I/O channel */
+		hello_context[i].bdev_io_channel = spdk_bdev_get_io_channel(hello_context[i].bdev_desc);
+		if (hello_context[i].bdev_io_channel == NULL) {
+			SPDK_ERRLOG("Could not create bdev I/O channel!!\n");
+			spdk_bdev_close(hello_context[i].bdev_desc);
+			spdk_app_stop(-1);
+			return;
+		}
+
+		/* Allocate memory for the write buffer.
+		 * Initialize the write buffer with the string "Hello World!"
+		 */
+		hello_context[i].buff_size = spdk_bdev_get_block_size(hello_context[i].bdev) *
+			spdk_bdev_get_write_unit_size(hello_context[i].bdev);
+		buf_align = spdk_bdev_get_buf_align(hello_context[i].bdev);
+		hello_context[i].buff = spdk_dma_zmalloc(hello_context[i].buff_size, buf_align, NULL);
+		if (!hello_context[i].buff) {
+			SPDK_ERRLOG("Failed to allocate buffer\n");
+			spdk_put_io_channel(hello_context[i].bdev_io_channel);
+			spdk_bdev_close(hello_context[i].bdev_desc);
+			spdk_app_stop(-1);
+			return;
+		}
+		if (i==0)
+		snprintf(hello_context[i].buff, hello_context[i].buff_size, "%s", "HELLO --- 1 \n");
+		else
+		snprintf(hello_context[i].buff, hello_context[i].buff_size, "%s", "GOOD --- 2 \n");
+
+		if (spdk_bdev_is_zoned(hello_context[i].bdev)) {
+			hello_reset_zone(&hello_context[i]);
+			/* If bdev is zoned, the callback, reset_zone_complete, will call hello_write() */
+			return;
+		}
+
+		hello_write(&hello_context[i]);
 	}
-
-	/* A bdev pointer is valid while the bdev is opened. */
-	hello_context->bdev = spdk_bdev_desc_get_bdev(hello_context->bdev_desc);
-
-
-	SPDK_NOTICELOG("Opening io channel\n");
-	/* Open I/O channel */
-	hello_context->bdev_io_channel = spdk_bdev_get_io_channel(hello_context->bdev_desc);
-	if (hello_context->bdev_io_channel == NULL) {
-		SPDK_ERRLOG("Could not create bdev I/O channel!!\n");
-		spdk_bdev_close(hello_context->bdev_desc);
-		spdk_app_stop(-1);
-		return;
-	}
-
-	/* Allocate memory for the write buffer.
-	 * Initialize the write buffer with the string "Hello World!"
-	 */
-	hello_context->buff_size = spdk_bdev_get_block_size(hello_context->bdev) *
-				   spdk_bdev_get_write_unit_size(hello_context->bdev);
-	buf_align = spdk_bdev_get_buf_align(hello_context->bdev);
-	hello_context->buff = spdk_dma_zmalloc(hello_context->buff_size, buf_align, NULL);
-	if (!hello_context->buff) {
-		SPDK_ERRLOG("Failed to allocate buffer\n");
-		spdk_put_io_channel(hello_context->bdev_io_channel);
-		spdk_bdev_close(hello_context->bdev_desc);
-		spdk_app_stop(-1);
-		return;
-	}
-	snprintf(hello_context->buff, hello_context->buff_size, "%s", "Hello World!\n");
-
-	if (spdk_bdev_is_zoned(hello_context->bdev)) {
-		hello_reset_zone(hello_context);
-		/* If bdev is zoned, the callback, reset_zone_complete, will call hello_write() */
-		return;
-	}
-
-	hello_write(hello_context);
 }
 
 int
@@ -281,7 +291,8 @@ main(int argc, char **argv)
 {
 	struct spdk_app_opts opts = {};
 	int rc = 0;
-	struct hello_context_t hello_context = {};
+	//struct hello_context_t hello_context = {};
+	struct hello_context_t hello_context[2];
 
 	/* Set default values in opts structure. */
 	spdk_app_opts_init(&opts, sizeof(opts));
@@ -295,8 +306,13 @@ main(int argc, char **argv)
 				      hello_bdev_usage)) != SPDK_APP_PARSE_ARGS_SUCCESS) {
 		exit(rc);
 	}
-	hello_context.bdev_name = g_bdev_name;
+	//hello_context[0].bdev_name = "Malloc0";
+	//hello_context[1].bdev_name = "Malloc1";
+	hello_context[0].bdev_name = "aio0";
+	hello_context[1].bdev_name = "aio1";
 
+	printf("\t\tbdev 1 name: %s\n", hello_context[0].bdev_name);
+	printf("\t\tbdev 2 name: %s\n", hello_context[1].bdev_name);
 	/*
 	 * spdk_app_start() will initialize the SPDK framework, call hello_start(),
 	 * and then block until spdk_app_stop() is called (or if an initialization
@@ -313,7 +329,7 @@ main(int argc, char **argv)
 	 */
 
 	/* When the app stops, free up memory that we allocated. */
-	spdk_dma_free(hello_context.buff);
+	spdk_dma_free(hello_context->buff);
 
 	/* Gracefully close out all of the SPDK subsystems. */
 	spdk_app_fini();
